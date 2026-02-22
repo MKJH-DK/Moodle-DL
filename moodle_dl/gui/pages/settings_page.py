@@ -1,5 +1,6 @@
 import logging
 
+from PySide6.QtCore import Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -21,6 +22,8 @@ from moodle_dl.config import ConfigHelper
 
 
 class SettingsPage(QWidget):
+
+    config_saved = Signal()
 
     def __init__(self, config: ConfigHelper, opts) -> None:
         super().__init__()
@@ -293,3 +296,4 @@ class SettingsPage(QWidget):
         self.config.set_property('download_domains_blacklist', blacklist)
 
         QMessageBox.information(self, 'Saved', 'Settings saved successfully.')
+        self.config_saved.emit()

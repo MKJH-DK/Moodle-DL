@@ -133,6 +133,8 @@ class MainWindow(QMainWindow):
         # Wire signals
         self.login_page.login_successful.connect(self._on_login_success)
         self.login_page.login_failed.connect(self._on_login_failed)
+        self.config_page.config_saved.connect(self.download_page.invalidate)
+        self.settings_page.config_saved.connect(self.download_page.invalidate)
 
     def _setup_shortcuts(self) -> None:
         """Set up Alt+1..5 navigation shortcuts."""

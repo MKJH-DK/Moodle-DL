@@ -130,6 +130,11 @@ class DownloadPage(QWidget):
     # Phase management
     # -------------------------------------------------------------------
 
+    def invalidate(self) -> None:
+        """Mark cached results as stale so the next on_show() triggers a rescan."""
+        if self._phase == Phase.PREVIEW:
+            self._reset_to_idle()
+
     def on_show(self) -> None:
         """Called when this page becomes visible."""
         if self._phase == Phase.IDLE:
