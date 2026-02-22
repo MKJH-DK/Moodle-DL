@@ -484,17 +484,61 @@ class LoginPage(QWidget):
         self._sso_worker.login_failed.connect(self._on_sso_login_failed)
         self._sso_worker.start()
 
+    def cleanup(self) -> None:
+        """Public cleanup method — call before the application exits."""
+        if self._worker is not None and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(2000)
+        if self._sso_worker is not None and self._sso_worker.isRunning():
+            self._sso_worker.quit()
+            self._sso_worker.wait(2000)
+        self._cleanup_sso_webview()
+
     def _cleanup_sso_webview(self) -> None:
-        """Remove and clean up the SSO web view and scheme handler."""
+        """Remove and clean up the SSO web view, page, handler, and profile.
+
+        Destruction order matters: the page must be deleted before the profile,
+        otherwise Qt emits "Release of profile requested but WebEnginePage
+        still not deleted."
+        """
+        from PySide6.QtWidgets import QApplication
+
+        if self._sso_page is not None:
+            try:
+                self._sso_page.loadFinished.disconnect()
+                self._sso_page.titleChanged.disconnect()
+                self._sso_page.token_received.disconnect()
+            except RuntimeError:
+                pass
+
+        if self._sso_scheme_handler is not None:
+            try:
+                self._sso_scheme_handler.token_received.disconnect()
+            except RuntimeError:
+                pass
+
         if self._sso_webview is not None:
             self._sso_webview_container.removeWidget(self._sso_webview)
+            self._sso_webview.setPage(None)
             self._sso_webview.deleteLater()
             self._sso_webview = None
+
+        if self._sso_page is not None:
+            self._sso_page.deleteLater()
+            self._sso_page = None
+
         if self._sso_scheme_handler is not None and self._sso_profile is not None:
             self._sso_profile.removeUrlSchemeHandler(self._sso_scheme_handler)
-        self._sso_page = None
-        self._sso_scheme_handler = None
-        self._sso_profile = None
+
+        if self._sso_scheme_handler is not None:
+            self._sso_scheme_handler.deleteLater()
+            self._sso_scheme_handler = None
+
+        if self._sso_profile is not None:
+            self._sso_profile.deleteLater()
+            self._sso_profile = None
+
+        QApplication.processEvents()
 
     def _on_sso_login_success(self) -> None:
         """Handle successful SSO login."""

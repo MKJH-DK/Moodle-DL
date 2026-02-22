@@ -102,6 +102,29 @@ class MainWindow(QMainWindow):
             self.act_notifications,
         ]
 
+        # Separator + tools
+        self.toolbar.addSeparator()
+
+        self.act_manage_db = QAction('Missing Files', self)
+        self.act_manage_db.setEnabled(False)
+        self.act_manage_db.setToolTip('Find files tracked in the database but missing from disk. Remove entries to re-download them.')
+        self.act_manage_db.triggered.connect(self._on_manage_db)
+        self.toolbar.addAction(self.act_manage_db)
+
+        self.act_old_files = QAction('Outdated Copies', self)
+        self.act_old_files.setEnabled(False)
+        self.act_old_files.setToolTip('Find old file versions that have been replaced by newer ones. Delete them to free disk space.')
+        self.act_old_files.triggered.connect(self._on_old_files)
+        self.toolbar.addAction(self.act_old_files)
+
+        self.toolbar.addSeparator()
+
+        self.act_logout = QAction('Logout', self)
+        self.act_logout.setEnabled(False)
+        self.act_logout.setToolTip('Log out and return to the login page.')
+        self.act_logout.triggered.connect(self._on_logout)
+        self.toolbar.addAction(self.act_logout)
+
         # Status bar
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -163,6 +186,9 @@ class MainWindow(QMainWindow):
         self.act_download.setEnabled(True)
         self.act_settings.setEnabled(True)
         self.act_notifications.setEnabled(True)
+        self.act_manage_db.setEnabled(True)
+        self.act_old_files.setEnabled(True)
+        self.act_logout.setEnabled(True)
 
     def _navigate(self, page_index: int) -> None:
         """Navigate to a page and update the active indicator."""
@@ -185,9 +211,51 @@ class MainWindow(QMainWindow):
         elif page_index == self.PAGE_NOTIFICATIONS:
             self.notifications_page.on_show()
 
+    def _on_logout(self) -> None:
+        """Log out: clear tokens, disable navigation, return to login page."""
+        reply = QMessageBox.question(
+            self,
+            'Logout',
+            'Are you sure you want to log out? Any running downloads will be cancelled.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self.download_page.cancel_all()
+        self.config.remove_property('token')
+        self.config.remove_property('privatetoken')
+        self._logged_in = False
+        self.act_config.setEnabled(False)
+        self.act_download.setEnabled(False)
+        self.act_settings.setEnabled(False)
+        self.act_notifications.setEnabled(False)
+        self.act_manage_db.setEnabled(False)
+        self.act_old_files.setEnabled(False)
+        self.act_logout.setEnabled(False)
+        self._navigate(self.PAGE_LOGIN)
+        self.status_bar.showMessage('Logged out. Please log in again.')
+
+    def _on_manage_db(self) -> None:
+        """Open the database management dialog."""
+        from moodle_dl.gui.dialogs.database_dialog import DatabaseManagementDialog
+
+        dialog = DatabaseManagementDialog(self.config, self.opts, self)
+        dialog.exec()
+
+    def _on_old_files(self) -> None:
+        """Open the old files dialog."""
+        from moodle_dl.gui.dialogs.old_files_dialog import OldFilesDialog
+
+        dialog = OldFilesDialog(self.config, self.opts, self)
+        dialog.exec()
+
     def closeEvent(self, event) -> None:
-        """Save geometry and stop downloads on close."""
+        """Save geometry, stop downloads, and clean up WebEngine on close."""
         self._settings.setValue('window/geometry', self.saveGeometry())
         # Stop any running downloads
         self.download_page.cancel_all()
+        # Clean up SSO WebEngine resources to avoid profile/page teardown warning
+        self.login_page.cleanup()
         super().closeEvent(event)

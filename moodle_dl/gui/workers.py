@@ -235,3 +235,161 @@ class TestDiscordWorker(AsyncWorker):
             self.test_successful.emit()
         except Exception as e:
             self.test_failed.emit(str(e))
+
+
+class TestMailWorker(AsyncWorker):
+    """Sends a test email via SMTP."""
+
+    test_successful = Signal()
+    test_failed = Signal(str)
+
+    def __init__(self, sender: str, host: str, port: int, username: str, password: str, target: str) -> None:
+        super().__init__()
+        self.sender = sender
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.target = target
+
+    async def do_work(self) -> None:
+        try:
+            from moodle_dl.notifications.mail.mail_shooter import MailShooter
+
+            shooter = MailShooter(self.sender, self.host, self.port, self.username, self.password)
+            shooter.send(self.target, 'Moodle-DL GUI: Test', '<p>This is a test message from Moodle-DL GUI.</p>', {})
+            self.test_successful.emit()
+        except Exception as e:
+            self.test_failed.emit(str(e))
+
+
+class TestNtfyWorker(AsyncWorker):
+    """Sends a test message via ntfy."""
+
+    test_successful = Signal()
+    test_failed = Signal(str)
+
+    def __init__(self, topic: str, server: str) -> None:
+        super().__init__()
+        self.topic = topic
+        self.server = server or None
+
+    async def do_work(self) -> None:
+        try:
+            from moodle_dl.notifications.ntfy.ntfy_shooter import NtfyShooter
+
+            shooter = NtfyShooter(self.topic, self.server)
+            shooter.send('Moodle-DL GUI: Test', 'This is a test message from Moodle-DL GUI.')
+            self.test_successful.emit()
+        except Exception as e:
+            self.test_failed.emit(str(e))
+
+
+class TestXmppWorker(AsyncWorker):
+    """Sends a test message via XMPP."""
+
+    test_successful = Signal()
+    test_failed = Signal(str)
+
+    def __init__(self, jid: str, password: str, recipient: str) -> None:
+        super().__init__()
+        self.jid = jid
+        self.password = password
+        self.recipient = recipient
+
+    async def do_work(self) -> None:
+        try:
+            from moodle_dl.notifications.xmpp.xmpp_shooter import XmppShooter
+
+            shooter = XmppShooter(self.jid, self.password, self.recipient)
+            shooter.send('Moodle-DL GUI: Test message')
+            self.test_successful.emit()
+        except Exception as e:
+            self.test_failed.emit(str(e))
+
+
+class NotifyWorker(AsyncWorker):
+    """Sends post-download notifications via all configured services."""
+
+    notify_finished = Signal()
+
+    def __init__(self, config: ConfigHelper, database: object) -> None:
+        super().__init__()
+        self.config = config
+        self.database = database
+
+    async def do_work(self) -> None:
+        from moodle_dl.notifications import get_all_notify_services
+
+        services = get_all_notify_services(self.config)
+        changes = self.database.changes_to_notify()
+        if not changes:
+            self.notify_finished.emit()
+            return
+
+        for service in services:
+            try:
+                service.notify_about_changes_in_moodle(changes)
+            except Exception as e:
+                logging.warning('Notification service %s failed: %s', type(service).__name__, e)
+
+        self.database.notified(changes)
+        self.notify_finished.emit()
+
+
+class FetchSectionsWorker(AsyncWorker):
+    """Fetches available sections for a course."""
+
+    sections_fetched = Signal(list)
+
+    def __init__(self, config: ConfigHelper, opts: MoodleDlOpts, course_id: int) -> None:
+        super().__init__()
+        self.config = config
+        self.opts = opts
+        self.course_id = course_id
+
+    async def do_work(self) -> None:
+        token = self.config.get_token()
+        moodle_url = self.config.get_moodle_URL()
+        request_helper = RequestHelper(self.config, self.opts, moodle_url, token)
+        core_handler = CoreHandler(request_helper)
+        sections = core_handler.fetch_sections(self.course_id)
+        self.sections_fetched.emit(sections)
+
+
+class FetchStoredFilesWorker(AsyncWorker):
+    """Fetches stored files from the database, filtering to missing ones."""
+
+    files_fetched = Signal(list)
+
+    def __init__(self, config: ConfigHelper, opts: MoodleDlOpts) -> None:
+        super().__init__()
+        self.config = config
+        self.opts = opts
+
+    async def do_work(self) -> None:
+        import os
+
+        database = StateRecorder(self.config, self.opts)
+        courses = database.get_stored_files()
+        # Filter to files that no longer exist on disk
+        for course in courses:
+            course.files = [f for f in course.files if f.saved_to and not os.path.exists(f.saved_to)]
+        courses = [c for c in courses if c.files]
+        self.files_fetched.emit(courses)
+
+
+class FetchOldFilesWorker(AsyncWorker):
+    """Fetches old (superseded) file copies from the database."""
+
+    files_fetched = Signal(list)
+
+    def __init__(self, config: ConfigHelper, opts: MoodleDlOpts) -> None:
+        super().__init__()
+        self.config = config
+        self.opts = opts
+
+    async def do_work(self) -> None:
+        database = StateRecorder(self.config, self.opts)
+        courses = database.get_old_files()
+        self.files_fetched.emit(courses)

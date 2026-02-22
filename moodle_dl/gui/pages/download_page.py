@@ -25,14 +25,9 @@ from moodle_dl.gui.pages.download_models import (
     TaskTableModel,
 )
 from moodle_dl.gui.style_utils import set_status_text
-from moodle_dl.gui.workers import DownloadWorker, FetchWorker
+from moodle_dl.gui.workers import DownloadWorker, FetchWorker, NotifyWorker
 from moodle_dl.types import TaskState
 from moodle_dl.utils import format_bytes
-
-# ---------------------------------------------------------------------------
-# DownloadPage
-# ---------------------------------------------------------------------------
-
 
 class DownloadPage(QWidget):
 
@@ -43,6 +38,7 @@ class DownloadPage(QWidget):
         self._phase = Phase.IDLE
         self._fetch_worker = None
         self._download_worker = None
+        self._notify_worker = None
         self._download_service = None
         self._fetched_courses = None
         self._fetched_database = None
@@ -263,6 +259,19 @@ class DownloadPage(QWidget):
             )
 
         self._download_service = None
+
+        # Trigger post-download notifications
+        database = self._fetched_database
+        if database is not None:
+            self._notify_worker = NotifyWorker(self.config, database)
+            self._notify_worker.notify_finished.connect(self._on_notify_done)
+            self._notify_worker.error_occurred.connect(self._on_notify_done)
+            self._notify_worker.start()
+        else:
+            self._reset_to_idle()
+
+    def _on_notify_done(self, *_args) -> None:
+        """Called after post-download notifications complete (or fail)."""
         self._reset_to_idle()
 
     def _on_download_error(self, error_msg: str) -> None:
@@ -430,6 +439,9 @@ class DownloadPage(QWidget):
             self._download_worker.request_cancel()
             self._download_worker.quit()
             self._download_worker.wait(3000)
+        if self._notify_worker is not None and self._notify_worker.isRunning():
+            self._notify_worker.quit()
+            self._notify_worker.wait(3000)
 
     # -------------------------------------------------------------------
     # Helpers

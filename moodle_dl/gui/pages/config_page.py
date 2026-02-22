@@ -3,6 +3,7 @@ import logging
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QCursor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
@@ -10,6 +11,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -59,6 +61,19 @@ class ConfigPage(QWidget):
 
         btn_row.addStretch()
         courses_layout.addLayout(btn_row)
+
+        # Whitelist / Blacklist mode toggle
+        mode_row = QHBoxLayout()
+        self.radio_whitelist = QRadioButton('Download selected courses')
+        self.radio_blacklist = QRadioButton('Download all except selected')
+        self.radio_whitelist.setChecked(True)
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.addButton(self.radio_whitelist)
+        self._mode_group.addButton(self.radio_blacklist)
+        mode_row.addWidget(self.radio_whitelist)
+        mode_row.addWidget(self.radio_blacklist)
+        mode_row.addStretch()
+        courses_layout.addLayout(mode_row)
 
         self.courses_status = QLabel('Click "Fetch Courses" to load your course list.')
         courses_layout.addWidget(self.courses_status)
@@ -202,20 +217,33 @@ class ConfigPage(QWidget):
         self._course_checkboxes.clear()
         self._checkbox_to_course.clear()
 
-        # Get currently selected course IDs
-        selected_ids = set(self.config.get_download_course_ids())
-        # If no courses are selected yet, select all by default
-        select_all_by_default = len(selected_ids) == 0
+        # Detect whitelist vs blacklist mode
+        download_ids = set(self.config.get_download_course_ids())
+        dont_download_ids = set(self.config.get_dont_download_course_ids())
+        use_blacklist = len(dont_download_ids) > 0 and len(download_ids) == 0
+
+        if use_blacklist:
+            self.radio_blacklist.setChecked(True)
+        else:
+            self.radio_whitelist.setChecked(True)
+
+        # If no courses configured yet, select all by default
+        first_time = len(download_ids) == 0 and len(dont_download_ids) == 0
 
         # Add checkboxes for each course
+        # Checked always means "this course will be downloaded"
         for course_info in courses:
             course_id = course_info['id']
             fullname = course_info['fullname']
             cb = QCheckBox(f'{fullname} (ID: {course_id})')
             cb.installEventFilter(self)
             self._checkbox_to_course[cb] = (course_id, fullname)
-            if select_all_by_default or course_id in selected_ids:
+            if first_time:
                 cb.setChecked(True)
+            elif use_blacklist:
+                cb.setChecked(course_id not in dont_download_ids)
+            else:
+                cb.setChecked(course_id in download_ids)
             self.course_list_layout.addWidget(cb)
             self._course_checkboxes[course_id] = cb
 
@@ -247,7 +275,7 @@ class ConfigPage(QWidget):
         """Open per-course options dialog."""
         from moodle_dl.gui.dialogs.course_options_dialog import CourseOptionsDialog
 
-        dialog = CourseOptionsDialog(self.config, course_id, course_name, self)
+        dialog = CourseOptionsDialog(self.config, self.opts, course_id, course_name, self)
         dialog.exec()
 
     def _select_all_courses(self) -> None:
@@ -264,17 +292,29 @@ class ConfigPage(QWidget):
 
     def _on_save(self) -> None:
         """Save course selection and download options."""
-        # Save selected course IDs
-        selected_ids = []
-        for course_id, cb in self._course_checkboxes.items():
-            if cb.isChecked():
-                selected_ids.append(course_id)
+        use_blacklist = self.radio_blacklist.isChecked()
 
-        if self._course_checkboxes and not selected_ids:
-            QMessageBox.warning(self, 'No courses selected', 'Please select at least one course.')
-            return
+        if use_blacklist:
+            # Blacklist: save UNchecked IDs to dont_download_course_ids
+            unchecked_ids = []
+            for course_id, cb in self._course_checkboxes.items():
+                if not cb.isChecked():
+                    unchecked_ids.append(course_id)
+            self.config.set_property('dont_download_course_ids', unchecked_ids)
+            self.config.remove_property('download_course_ids')
+        else:
+            # Whitelist: save checked IDs to download_course_ids
+            selected_ids = []
+            for course_id, cb in self._course_checkboxes.items():
+                if cb.isChecked():
+                    selected_ids.append(course_id)
 
-        self.config.set_property('download_course_ids', selected_ids)
+            if self._course_checkboxes and not selected_ids:
+                QMessageBox.warning(self, 'No courses selected', 'Please select at least one course.')
+                return
+
+            self.config.set_property('download_course_ids', selected_ids)
+            self.config.remove_property('dont_download_course_ids')
 
         # Save download options
         self.config.set_property('download_submissions', self.opt_submissions.isChecked())
