@@ -86,6 +86,15 @@ class MoodleService:
 
         public_courses_list = core_handler.fetch_courses_info(download_public_course_ids)
         courses.extend(public_courses_list)
+
+        # Filter by course name if --courses flag was provided
+        courses_filter = getattr(self.opts, 'courses_filter', None) or []
+        if courses_filter:
+            courses = [
+                c for c in courses
+                if any(f.lower() in c.fullname.lower() for f in courses_filter)
+            ]
+
         return courses
 
     def get_user_id_and_version(self, core_handler: CoreHandler) -> Tuple[int, int]:
@@ -257,6 +266,16 @@ class MoodleService:
 
             if len(course.files) > 0:
                 filtered_changes.append(course)
+
+        # Filter by section name if --sections flag was provided
+        sections_filter = getattr(self.opts, 'sections_filter', None) or []
+        if sections_filter:
+            for course in filtered_changes:
+                course.files = [
+                    f for f in course.files
+                    if any(s.lower() in (f.section_name or '').lower() for s in sections_filter)
+                ]
+            filtered_changes = [c for c in filtered_changes if c.files]
 
         return filtered_changes
 

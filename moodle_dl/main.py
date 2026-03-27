@@ -33,6 +33,7 @@ from moodle_dl.downloader.download_service import DownloadService
 from moodle_dl.downloader.fake_download_service import FakeDownloadService
 from moodle_dl.moodle.moodle_service import MoodleService
 from moodle_dl.notifications import get_all_notify_services
+from moodle_dl.reporting import DownloadReportWriter
 from moodle_dl.types import MoodleDlOpts
 from moodle_dl.utils import PathTools as PT
 from moodle_dl.utils import ProcessLock, check_debug
@@ -110,6 +111,12 @@ def run_main(config: ConfigHelper, opts: MoodleDlOpts):
             downloader = DownloadService(changed_courses, config, opts, database)
         downloader.run()
         failed_downloads = downloader.get_failed_tasks()
+        report_info = DownloadReportWriter(config.get_misc_files_path()).write(
+            changed_courses=changed_courses,
+            failed_downloads=failed_downloads,
+            all_tasks=downloader.all_tasks,
+        )
+        logging.info('Run report written to %s', report_info['markdown_path'])
 
         changed_courses_to_notify = database.changes_to_notify()
 
@@ -535,6 +542,31 @@ def get_parser():
             'Sets the location of the log files created with --log-to-file. PATH must be an existing directory'
             + ' in which you have read and write access. (default: same as --path)'
         ),
+    )
+
+    filter_group = parser.add_argument_group('Filtering')
+    filter_group.add_argument(
+        '--courses',
+        dest='courses_filter',
+        nargs='*',
+        default=[],
+        metavar='NAME',
+        help='Only download courses whose name contains these strings (case-insensitive partial match).',
+    )
+    filter_group.add_argument(
+        '--sections',
+        dest='sections_filter',
+        nargs='*',
+        default=[],
+        metavar='SECTION',
+        help='Only download files from sections whose name contains these strings (case-insensitive partial match).',
+    )
+    filter_group.add_argument(
+        '--save-failed-links',
+        dest='save_failed_links',
+        default=False,
+        action='store_true',
+        help='Write URLs that could not be downloaded to _links.txt files.',
     )
 
     return parser

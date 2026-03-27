@@ -280,6 +280,9 @@ class MoodleDlOpts:
     log_to_file: bool
     log_file_path: str
     gui: bool
+    courses_filter: list  # filter downloads to courses whose name contains these strings
+    sections_filter: list  # filter downloads to sections whose name contains these strings
+    save_failed_links: bool  # write failed download URLs to _links.txt files
 
 
 class TaskState(Enum):
@@ -301,6 +304,9 @@ class TaskStatus:
     yt_dlp_total_size_per_file: Dict[str, int] = field(init=False, default_factory=dict)
     yt_dlp_bytes_downloaded_per_file: Dict[str, int] = field(init=False, default_factory=dict)
     skip_requested: bool = field(init=False, default=False)
+    external_host: str = field(init=False, default='')
+    external_platform: str = field(init=False, default='')
+    download_strategy: str = field(init=False, default='direct')
 
     def get_error_text(self) -> str:
         str_error = str(self.error).strip()

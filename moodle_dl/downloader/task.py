@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from email.utils import unquote
 from io import StringIO
 from pathlib import Path
-from typing import Callable, Dict
+from typing import Callable, Dict, List, Optional
 from urllib.error import ContentTooShortError
 
 import aiofiles
@@ -51,6 +51,22 @@ from moodle_dl.utils import (
 class Task:
     "Task is responsible to download or create a file"
 
+    VIDEO_PLATFORM_PATTERNS = {
+        'youtube': ('youtube.com', 'youtu.be'),
+        'vimeo': ('vimeo.com', 'player.vimeo.com'),
+        'opencast': ('opencast',),
+        'echo360': ('echo360',),
+        'kaltura': ('kaltura', 'kalvidres'),
+        'helixmedia': ('helix', 'helixmedia'),
+        'sharepoint-stream': ('sharepoint.com', 'microsoftstream.com', 'stream.office.com'),
+        'panopto': ('panopto.com',),
+        'wistia': ('wistia.com', 'wi.st'),
+        'synthesia': ('synthesia.io',),
+        'heygen': ('heygen.com',),
+        'livelearning': ('livelearning',),
+        'moodle-lti-video': ('mod/lti', 'mod/helixmedia', 'mod/kalvidres', 'mod/opencast'),
+    }
+
     CHUNK_SIZE = 102400  # default: 1024 * 100 = 100kb; will be overwritten with download_chunk_size
     MAX_DL_RETRIES = 3
 
@@ -81,6 +97,7 @@ class Task:
         self.destination = self.gen_path(options.download_path, course, file)
         self.filename = PT.to_valid_name(self.file.content_filename, is_file=True)
         self.status = TaskStatus()
+        self.shortcut_paths: List[str] = []
 
     @staticmethod
     def gen_path(storage_path: str, course: Course, file: File):
@@ -280,9 +297,57 @@ class Task:
     def is_blocked_for_yt_dlp(self, url: str):
         url_parsed = urlparse.urlparse(url)
         # Do not download whole YT channels
-        if url_parsed.hostname.endswith('youtube.com') and url_parsed.path.startswith('/channel/'):
+        if url_parsed.hostname and url_parsed.hostname.endswith('youtube.com') and url_parsed.path.startswith('/channel/'):
             return True
         return False
+
+    def detect_external_platform(self, url: str) -> str:
+        url_parsed = urlparse.urlparse(url)
+        haystack = ' '.join(
+            part for part in [url_parsed.hostname or '', url_parsed.path or '', url_parsed.query or ''] if part
+        ).lower()
+
+        for platform, patterns in self.VIDEO_PLATFORM_PATTERNS.items():
+            if any(pattern in haystack for pattern in patterns):
+                return platform
+        return 'generic'
+
+    def set_external_context(self, url: str):
+        url_parsed = urlparse.urlparse(url)
+        self.status.external_host = url_parsed.hostname or ''
+        self.status.external_platform = self.detect_external_platform(url)
+
+    def remember_shortcut_path(self, shortcut_path: str):
+        if shortcut_path not in self.shortcut_paths:
+            self.shortcut_paths.append(shortcut_path)
+
+    def get_existing_shortcut_path(self) -> Optional[str]:
+        for shortcut_path in self.shortcut_paths:
+            if os.path.isfile(shortcut_path):
+                return shortcut_path
+        return None
+
+    def get_failure_marker_path(self) -> Optional[str]:
+        shortcut_path = self.get_existing_shortcut_path()
+        if shortcut_path is None:
+            return None
+        return f'{shortcut_path}.download-error.txt'
+
+    async def write_download_failure_marker(self, error_message: str):
+        error_path = self.get_failure_marker_path()
+        if error_path is None:
+            return
+        async with aiofiles.open(error_path, 'w+', encoding='utf-8') as error_file:
+            await error_file.write(f'URL={self.file.content_fileurl}\n')
+            await error_file.write(f'HOST={self.status.external_host}\n')
+            await error_file.write(f'PLATFORM={self.status.external_platform}\n')
+            await error_file.write(f'STRATEGY={self.status.download_strategy}\n')
+            await error_file.write(f'ERROR={error_message}\n')
+
+    def remove_failure_marker(self):
+        error_path = self.get_failure_marker_path()
+        if error_path is not None:
+            PT.remove_file(error_path)
 
     def set_utime(self, last_modified_header: str = None):
         """
@@ -379,6 +444,7 @@ class Task:
         @return: False if the page should be downloaded anyway; True if yt-dlp has processed the URL and we are done
         """
         # We try to limit the filename to < 250 chars
+        self.status.download_strategy = 'yt-dlp'
         if self.file.content_type == 'description-url':
             filename_template = '%(title).180B (%(id).32B).%(ext)s'
         else:
@@ -483,7 +549,6 @@ class Task:
         if external_dl_failed_with_error:
             logging.error('[%d] External downloader error: %s', self.task_id, stderr)
             if not delete_if_successful:
-                # cleanup the url-link file
                 PT.remove_file(self.file.saved_to)
             raise RuntimeError('The external downloader could not download the URL')
 
@@ -502,6 +567,8 @@ class Task:
         """
         url_to_download = self.file.content_fileurl
         logging.debug('[%d] Try to download external file %s', self.task_id, url_to_download)
+        self.set_external_context(url_to_download)
+        self.status.download_strategy = 'head-check'
 
         if add_token:
             url_to_download = self.add_token_to_url(url_to_download)
@@ -525,6 +592,7 @@ class Task:
 
         external_dl_cmd = self.opts.external_file_downloaders.get(infos.host, "")
         if infos.is_html and external_dl_cmd != "":
+            self.status.download_strategy = 'external-downloader'
             await self.download_using_external_downloader(
                 dl_url=url_to_download,
                 external_dl_cmd=external_dl_cmd,
@@ -541,6 +609,7 @@ class Task:
                 return
 
         logging.debug('[%d] Downloading URL directly', self.task_id)
+        self.status.download_strategy = 'direct-download'
 
         # Generate file name for external file
         new_name, new_extension = os.path.splitext(infos.guessed_file_name)
@@ -592,6 +661,8 @@ class Task:
         for link_type, should_write in self.opts.write_links.items():
             if should_write:
                 self.set_path(True, link_type)
+                self.remember_shortcut_path(self.file.saved_to)
+                self.remove_failure_marker()
                 async with aiofiles.open(
                     self.file.saved_to, 'w+', encoding='utf-8', newline='\r\n' if link_type == 'url' else '\n'
                 ) as shortcut:
@@ -777,9 +848,15 @@ class Task:
 
             logging.debug('[%d] Traceback:\n%s', self.task_id, traceback.format_exc())
 
-            # TODO: Do this in the error handlers of download functions
-            # TODO: See download_url; remove only if not recoverable
-            PT.remove_file(self.file.saved_to)
+            # Keep link shortcuts for external URLs so the compiler can still index them.
+            shortcut_path = self.get_existing_shortcut_path()
+            if self.file.content_type == 'description-url' and shortcut_path is not None:
+                if self.file.saved_to != shortcut_path:
+                    PT.remove_file(self.file.saved_to)
+                await self.write_download_failure_marker(self.status.get_error_text())
+                self.file.saved_to = shortcut_path
+            else:
+                PT.remove_file(self.file.saved_to)
             self.report_received_bytes(-self.status.bytes_downloaded)
             self.report_failure()
 
@@ -804,12 +881,32 @@ class Task:
         return False
 
     def report_success(self):
+        self.remove_failure_marker()
         self.status.state = TaskState.FINISHED
         self.callback(DlEvent.FINISHED, self)
 
     def report_failure(self):
         self.status.state = TaskState.FAILED
         self.callback(DlEvent.FAILED, self)
+        if getattr(self.opts.global_opts, 'save_failed_links', False):
+            self._write_failed_link()
+
+    def _write_failed_link(self) -> None:
+        """Append the failed download URL to a _links.txt file next to the target path."""
+        try:
+            url = self.file.content_fileurl or ''
+            if not url:
+                return
+            saved_to = self.file.saved_to or ''
+            if not saved_to:
+                return
+            from pathlib import Path
+            links_file = Path(saved_to).parent / '_links.txt'
+            name = self.file.content_filename or Path(saved_to).name
+            with open(links_file, 'a', encoding='utf-8') as f:
+                f.write(f'# {name}\n{url}\n\n')
+        except Exception:
+            pass  # best-effort, must not interrupt download flow
 
     def report_received_bytes(self, bytes_received: int):
         self.status.bytes_downloaded += bytes_received
